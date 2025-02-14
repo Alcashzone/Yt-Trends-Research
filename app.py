@@ -5,41 +5,36 @@ from googleapiclient.discovery import build
 import pandas as pd
 
 # Set up YouTube API client
-API_KEY = os.getenv('YOUTUBE_API_KEY')
+API_KEY = os.getenv('AIzaSyC9Cf0P61P-g7IRpa1wB7NT4bR6qrQmEqg')
 youtube = build('youtube', 'v3', developerKey=API_KEY)
 
 def get_video_stats(video_id):
-    """Get video statistics including view count"""
     request = youtube.videos().list(
-        part="statistics",
+        part="statistics,contentDetails",
         id=video_id
     )
     response = request.execute()
-    return response['items'][0]['statistics']
+    return response['items'][0]['statistics'], response['items'][0]['contentDetails']
 
 def get_channel_stats(channel_id):
-    """Get channel statistics including subscriber count"""
     request = youtube.channels().list(
-        part="statistics",
+        part="statistics,snippet",
         id=channel_id
     )
     response = request.execute()
-    return response['items'][0]['statistics']
+    return response['items'][0]['statistics'], response['items'][0]['snippet']
 
-def search_videos(keywords):
-    # Calculate date 7 days ago
-    seven_days_ago = (datetime.utcnow() - timedelta(days=7)).strftime('%Y-%m-%dT%H:%M:%SZ')
-    
+def search_videos(keywords, start_date, end_date, min_subs, max_subs, result_limit, video_type):
     videos = []
     
-    # Search for each keyword
     for keyword in keywords:
         request = youtube.search().list(
             q=keyword.strip(),
             part="snippet",
             type="video",
-            publishedAfter=seven_days_ago,
-            maxResults=10,
+            publishedAfter=start_date.isoformat() + "Z",
+            publishedBefore=end_date.isoformat() + "Z",
+            maxResults=result_limit,
             order="viewCount"
         )
         response = request.execute()
@@ -48,51 +43,84 @@ def search_videos(keywords):
             video_id = item['id']['videoId']
             channel_id = item['snippet']['channelId']
             
-            # Get video statistics
-            video_stats = get_video_stats(video_id)
-            # Get channel statistics
-            channel_stats = get_channel_stats(channel_id)
+            video_stats, video_details = get_video_stats(video_id)
+            channel_stats, channel_snippet = get_channel_stats(channel_id)
             
-            # Only include videos from channels with relatively fewer subscribers
-            # but good view counts (customize these thresholds as needed)
-            if (int(channel_stats['subscriberCount']) < 100000 and 
-                int(video_stats['viewCount']) > 10000):
+            subscriber_count = int(channel_stats.get('subscriberCount', 0))
+            if min_subs <= subscriber_count <= max_subs:
+                duration = video_details['duration']
+                is_short = 'PT60S' >= duration
                 
-                videos.append({
-                    'title': item['snippet']['title'],
-                    'video_id': video_id,
-                    'channel_name': item['snippet']['channelTitle'],
-                    'thumbnail': item['snippet']['thumbnails']['high']['url'],
-                    'views': int(video_stats['viewCount']),
-                    'subscribers': int(channel_stats['subscriberCount']),
-                    'published_at': item['snippet']['publishedAt']
-                })
+                if (video_type == 'All' or 
+                    (video_type == 'Shorts' and is_short) or 
+                    (video_type == 'Long' and not is_short)):
+                    
+                    videos.append({
+                        'title': item['snippet']['title'],
+                        'video_id': video_id,
+                        'channel_name': item['snippet']['channelTitle'],
+                        'thumbnail': item['snippet']['thumbnails']['high']['url'],
+                        'views': int(video_stats.get('viewCount', 0)),
+                        'subscribers': subscriber_count,
+                        'published_at': item['snippet']['publishedAt'],
+                        'channel_created': channel_snippet['publishedAt'],
+                        'duration': duration,
+                        'is_short': is_short
+                    })
     
     return videos
 
 # Streamlit UI
 st.title("YouTube Trending Videos Analyzer")
-st.write("Find videos from the last 7 days with high views but from smaller channels")
+st.write("Find trending videos from smaller channels")
 
-# Input box for keywords
-keywords_input = st.text_input(
+# Sidebar for filters
+st.sidebar.title("Filters")
+
+keywords_input = st.sidebar.text_input(
     "Enter keywords (comma-separated)",
     placeholder="gaming, technology, cooking..."
 )
 
-if st.button("Research"):
-    if keywords_input:
+date_range = st.sidebar.date_input(
+    "Date Range",
+    value=(datetime.now() - timedelta(days=7), datetime.now()),
+    max_value=datetime.now()
+)
+
+min_subs, max_subs = st.sidebar.slider(
+    "Channel Subscriber Count",
+    min_value=100,
+    max_value=10000,
+    value=(100, 10000)
+)
+
+result_limit = st.sidebar.slider(
+    "Number of Results",
+    min_value=10,
+    max_value=50,
+    value=20
+)
+
+video_type = st.sidebar.selectbox(
+    "Video Type",
+    options=["All", "Shorts", "Long"]
+)
+
+if st.sidebar.button("Research"):
+    if keywords_input and len(date_range) == 2:
         keywords = [k.strip() for k in keywords_input.split(',')]
+        start_date, end_date = date_range
         
         with st.spinner('Searching for videos...'):
-            videos = search_videos(keywords)
+            videos = search_videos(keywords, start_date, end_date, min_subs, max_subs, result_limit, video_type)
             
             if videos:
-                # Convert to DataFrame and sort by views
                 df = pd.DataFrame(videos)
+                df['published_at'] = pd.to_datetime(df['published_at'])
+                df['channel_created'] = pd.to_datetime(df['channel_created'])
                 df = df.sort_values('views', ascending=False)
                 
-                # Display results
                 for _, video in df.iterrows():
                     col1, col2 = st.columns([1, 2])
                     
@@ -104,21 +132,25 @@ if st.button("Research"):
                         st.write(f"Channel: {video['channel_name']}")
                         st.write(f"Views: {video['views']:,}")
                         st.write(f"Subscriber Count: {video['subscribers']:,}")
-                        st.write(f"Published: {video['published_at']}")
+                        st.write(f"Published: {video['published_at'].strftime('%Y-%m-%d')}")
+                        st.write(f"Channel Created: {video['channel_created'].strftime('%Y-%m-%d')}")
+                        st.write(f"Duration: {video['duration']}")
+                        st.write(f"Video Type: {'Short' if video['is_short'] else 'Long'}")
                     
                     st.divider()
             else:
                 st.warning("No videos found matching your criteria.")
     else:
-        st.error("Please enter at least one keyword.")
+        st.error("Please enter keywords and select a valid date range.")
 
 # Add footer with instructions
-st.markdown("""
+st.sidebar.markdown("""
 ---
 ### How to use:
-1. Enter keywords related to your research, separated by commas
-2. Click "Research" to find trending videos
-3. Results will show videos from the last 7 days with:
-   - High view counts (>10,000 views)
-   - From smaller channels (<100,000 subscribers)
+1. Enter keywords related to your research
+2. Set the date range for video publication
+3. Adjust the channel subscriber count range
+4. Choose the number of results to display
+5. Select the video type (All, Shorts, or Long)
+6. Click "Research" to find trending videos
 """)
